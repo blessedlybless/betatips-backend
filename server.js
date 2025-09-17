@@ -1,3 +1,7 @@
+require('dotenv').config();
+console.log('All environment variables:', process.env.MONGO_URL); // Add this line
+console.log('Current directory:', __dirname); // And this one
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -373,6 +377,94 @@ app.get('/', (req, res) => {
   });
 });
 
+// 🆕 ADD THE NEW ROUTES HERE (AFTER EXISTING ROUTES)
+// Delete game
+app.delete('/api/games/:id', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    await Game.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Game deleted successfully' });
+  } catch (error) {
+    console.error('Delete game error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Update game result
+app.patch('/api/games/:id/result', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    const game = await Game.findByIdAndUpdate(
+      req.params.id, 
+      { result: req.body.result }, 
+      { new: true }
+    );
+    
+    if (!game) {
+      return res.status(404).json({ message: 'Game not found' });
+    }
+    
+    res.json(game);
+  } catch (error) {
+    console.error('Update result error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Add comment to post
+app.post('/api/posts/:id/comments', authenticateToken, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+    
+    post.comments.push({
+      content: req.body.content,
+      author: req.user.userId,
+      createdAt: new Date()
+    });
+    
+    await post.save();
+    res.status(201).json(post);
+  } catch (error) {
+    console.error('Add comment error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Delete post
+app.delete('/api/posts/:id', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    const post = await Post.findById(req.params.id);
+    
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+    
+    if (post.author.toString() !== req.user.userId && !user.isAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+    
+    await Post.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Post deleted successfully' });
+  } catch (error) {
+    console.error('Delete post error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
 // ============================================
 // ERROR HANDLING
 // ============================================
@@ -405,3 +497,4 @@ process.on('SIGINT', async () => {
   console.log('✅ Database connection closed');
   process.exit(0);
 });
+
