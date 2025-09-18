@@ -102,6 +102,7 @@ const Game = mongoose.model('Game', {
   odds: { type: String, required: true },
   gameTime: { type: Date, required: true },
   status: { type: String, enum: ['pending', 'won', 'lost'], default: 'pending' },
+  result: { type: String, enum: ['win', 'loss'], default: null }, // ADD THIS LINE
   isVip: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
@@ -394,7 +395,7 @@ app.delete('/api/games/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Update game result
+// Update game result (fix the existing one)
 app.patch('/api/games/:id/result', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.userId);
@@ -402,9 +403,10 @@ app.patch('/api/games/:id/result', authenticateToken, async (req, res) => {
       return res.status(403).json({ message: 'Admin access required' });
     }
     
+    const { result } = req.body;
     const game = await Game.findByIdAndUpdate(
       req.params.id, 
-      { result: req.body.result }, 
+      { result: result }, // Make sure this field matches your Game model
       { new: true }
     );
     
@@ -412,12 +414,14 @@ app.patch('/api/games/:id/result', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Game not found' });
     }
     
+    console.log(`Game ${req.params.id} result updated to: ${result}`); // Debug log
     res.json(game);
   } catch (error) {
-    console.error('Update result error:', error);
+    console.error('Update game result error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 // Add comment to post
 app.post('/api/posts/:id/comments', authenticateToken, async (req, res) => {
@@ -463,6 +467,25 @@ app.delete('/api/posts/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Get all users (Admin only)
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    const users = await User.find()
+      .select('-password') // Don't send passwords
+      .sort({ createdAt: -1 }); // Newest first
+    
+    console.log('Returning users to admin:', users.length); // Debug log
+    res.json(users);
+  } catch (error) {
+    console.error('Get users error:', error);
+    res.status(500).json({ message: 'Server error fetching users' });
+  }
+});
 
 
 // ============================================
