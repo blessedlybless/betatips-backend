@@ -90,6 +90,7 @@ const User = mongoose.model('User', {
   password: { type: String, required: true },
   hasPaid: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
+  isBlocked: { type: Boolean, default: false }, // ADD THIS LINE
   paymentDate: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
@@ -486,6 +487,62 @@ app.get('/api/admin/users', authenticateToken, async (req, res) => {
     res.status(500).json({ message: 'Server error fetching users' });
   }
 });
+
+// Block/Unblock user (Admin only)
+app.patch('/api/admin/users/:id/block', authenticateToken, async (req, res) => {
+  try {
+    const admin = await User.findById(req.user.userId);
+    if (!admin.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    const { blocked } = req.body; // true or false
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isBlocked: blocked },
+      { new: true }
+    ).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json({ message: `User ${blocked ? 'blocked' : 'unblocked'} successfully`, user });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Grant/Remove VIP access (Admin only)
+app.patch('/api/admin/users/:id/vip', authenticateToken, async (req, res) => {
+  try {
+    const admin = await User.findById(req.user.userId);
+    if (!admin.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    const { hasPaid } = req.body; // true or false
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { 
+        hasPaid: hasPaid,
+        paymentDate: hasPaid ? new Date() : null
+      },
+      { new: true }
+    ).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json({ message: `VIP access ${hasPaid ? 'granted' : 'removed'} successfully`, user });
+  } catch (error) {
+    console.error('VIP update error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
 
 // ============================================
