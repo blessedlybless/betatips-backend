@@ -403,6 +403,10 @@ app.patch('/api/games/:id/result', authenticateToken, async (req, res) => {
     if (!user.isAdmin) {
       return res.status(403).json({ message: 'Admin access required' });
     }
+
+    console.log('🎯 Received request to update game:', req.params.id); // Add this
+    console.log('🎯 Result value:', result); // Add this
+    console.log('🎯 Request body:', req.body); // Add this
     
     const { result } = req.body;
     const game = await Game.findByIdAndUpdate(
