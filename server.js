@@ -582,6 +582,35 @@ app.patch('/api/admin/users/:id/generate-temp-password', authenticateToken, asyn
   }
 });
 
+// Block/Unblock user (Admin only)
+app.patch('/api/admin/users/:id/block', authenticateToken, async (req, res) => {
+  try {
+    const admin = await User.findById(req.user.userId);
+    if (!admin.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    const { blocked } = req.body;
+    console.log(`Admin attempting to ${blocked ? 'block' : 'unblock'} user ${req.params.id}`);
+    
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isBlocked: blocked },
+      { new: true }
+    ).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json({ message: `User ${blocked ? 'blocked' : 'unblocked'} successfully`, user });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({ message: 'Server error: ' + error.message });
+  }
+});
+
+
 
 
 
