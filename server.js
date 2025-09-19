@@ -104,7 +104,6 @@ const Game = mongoose.model('Game', {
   odds: { type: String, required: true },
   gameTime: { type: Date, required: true },
   status: { type: String, enum: ['pending', 'won', 'lost'], default: 'pending' },
-  result: { type: String, enum: ['win', 'loss'], default: null }, // ADD THIS LINE
   isVip: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
