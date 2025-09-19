@@ -91,6 +91,7 @@ const User = mongoose.model('User', {
   hasPaid: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
   isBlocked: { type: Boolean, default: false }, // ADD THIS LINE
+  needsPasswordChange: { type: Boolean, default: false }, // ADD THIS LINE
   paymentDate: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
@@ -542,6 +543,46 @@ app.patch('/api/admin/users/:id/vip', authenticateToken, async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+
+// Generate temporary password for user (Admin only)
+app.patch('/api/admin/users/:id/generate-temp-password', authenticateToken, async (req, res) => {
+  try {
+    const admin = await User.findById(req.user.userId);
+    if (!admin.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    // Generate 6-digit temporary password
+    const tempPassword = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // Hash the temporary password
+    const hashedPassword = await bcrypt.hash(tempPassword, 12);
+    
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { 
+        password: hashedPassword,
+        needsPasswordChange: true // Flag to force password change
+      },
+      { new: true }
+    ).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    console.log(`Temporary password generated for user ${user.username} by admin ${admin.username}`);
+    res.json({ 
+      message: 'Temporary password generated successfully',
+      tempPassword: tempPassword, // Send back to admin to give to user
+      user: user
+    });
+  } catch (error) {
+    console.error('Generate temp password error:', error);
+    res.status(500).json({ message: 'Server error: ' + error.message });
+  }
+});
+
 
 
 
