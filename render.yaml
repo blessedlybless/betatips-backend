@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: hardcore-predictions-api
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node server_v2.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18.17.0
+      - key: PORT
+        value: 10000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
