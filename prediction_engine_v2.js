@@ -1,5 +1,4 @@
 require('dotenv').config();
-
 const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(
@@ -7,11 +6,7 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-// ============ CONFIGURATION ============
-const ROLLING_WINDOW = 20;
 const MIN_MATCHES_FOR_PREDICTION = 5;
-const SEASON_TRANSITION_MATCHES = 5;
-
 const MARKETS = {
   '1': { name: 'Home Win', minProb: 0.58 },
   '2': { name: 'Away Win', minProb: 0.58 },
@@ -22,25 +17,15 @@ const MARKETS = {
   'BTTS Yes': { name: 'Both Teams To Score', minProb: 0.60 }
 };
 
-const DATA_QUALITY_GATES = {
-  MIN_FOR_ANY_PREDICTION: 0.30,
-  STRICT_MODE_THRESHOLD: 0.60,
-  HIGH_CONFIDENCE_THRESHOLD: 0.70
-};
-
-const MAX_PICKS_WEEKDAY = 3;
-const MAX_PICKS_WEEKEND = 5;
-
-// Poisson math
-function poissonProb(lambda, k) {
-  return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
-}
-
 function factorial(n) {
   if (n <= 1) return 1;
   let result = 1;
   for (let i = 2; i <= n; i++) result *= i;
   return result;
+}
+
+function poissonProb(lambda, k) {
+  return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
 }
 
 function poissonDistribution(lambda, maxGoals = 10) {
@@ -49,231 +34,126 @@ function poissonDistribution(lambda, maxGoals = 10) {
   return dist;
 }
 
-// ============ ROLLING WINDOW STATS ============
-async function getTeamRollingStats(teamName, competition) {
-  const { data: homeMatches } = await supabase
-    .from('fixtures').select('*')
-    .eq('home_team', teamName).eq('competition_code', competition)
-    .eq('status', 'FT').eq('season', '2026').order('match_date', { ascending: false }).limit(ROLLING_WINDOW);
-
-  const { data: awayMatches } = await supabase
-    .from('fixtures').select('*')
-    .eq('away_team', teamName).eq('competition_code', competition)
-    .eq('status', 'FT').eq('season', '2026').order('match_date', { ascending: false }).limit(ROLLING_WINDOW);
-
-  const allMatches = [...(homeMatches || []), ...(awayMatches || [])]
-    .sort((a, b) => new Date(b.match_date) - new Date(a.match_date))
-    .slice(0, ROLLING_WINDOW);
-
-  if (allMatches.length === 0) return getTeamHistoricalStats(teamName, competition);
-
-  const stats = {
-    team_name: teamName, competition: competition,
-    games_played: 0, wins: 0, draws: 0, losses: 0,
-    goals_for: 0, goals_against: 0,
-    home_games: 0, home_wins: 0, home_draws: 0, home_losses: 0,
-    home_goals_for: 0, home_goals_against: 0,
-    away_games: 0, away_wins: 0, away_draws: 0, away_losses: 0,
-    away_goals_for: 0, away_goals_against: 0,
-    last_5_results: [], form_points: 0,
-    data_source: 'rolling', matches_used: allMatches.length,
-    oldest_match_date: allMatches[allMatches.length - 1]?.match_date,
-    newest_match_date: allMatches[0]?.match_date
-  };
-
-  allMatches.forEach((match, idx) => {
-    const isHome = match.home_team === teamName;
-    const teamGoals = isHome ? match.home_goals : match.away_goals;
-    const oppGoals = isHome ? match.away_goals : match.home_goals;
-    
-    stats.games_played++;
-    stats.games_played++;
-    stats.goals_for += teamGoals; stats.goals_against += oppGoals;
-    if (isHome) {
-      stats.home_games++; stats.home_goals_for += teamGoals; stats.home_goals_against += oppGoals;
-      if (teamGoals > oppGoals) { stats.home_wins++; stats.wins++; }
-      else if (teamGoals === oppGoals) { stats.home_draws++; stats.draws++; }
-      else { stats.home_losses++; stats.losses++; }
-    } else {
-      stats.away_games++; stats.away_goals_for += teamGoals; stats.away_goals_against += oppGoals;
-      if (teamGoals > oppGoals) { stats.away_wins++; stats.wins++; }
-      else if (teamGoals === oppGoals) { stats.away_draws++; stats.draws++; }
-      else { stats.away_losses++; stats.losses++; }
-    }
-    if (idx < 5) {
-      if (teamGoals > oppGoals) { stats.last_5_results.push('W'); stats.form_points += 3; }
-      else if (teamGoals === oppGoals) { stats.last_5_results.push('D'); stats.form_points += 1; }
-      else { stats.last_5_results.push('L'); }
-    }
-  });
-
-  stats.win_rate = stats.games_played > 0 ? stats.wins / stats.games_played : 0;
-  stats.avg_goals_for = stats.games_played > 0 ? stats.goals_for / stats.games_played : 0;
-  stats.avg_goals_against = stats.games_played > 0 ? stats.goals_against / stats.games_played : 0;
-  stats.home_avg_goals_for = stats.home_games > 0 ? stats.home_goals_for / stats.home_games : 0;
-  stats.home_avg_goals_against = stats.home_games > 0 ? stats.home_goals_against / stats.home_games : 0;
-  stats.away_avg_goals_for = stats.away_games > 0 ? stats.away_goals_for / stats.away_games : 0;
-  stats.away_avg_goals_against = stats.away_games > 0 ? stats.away_goals_against / stats.away_games : 0;
-  stats.form_string = stats.last_5_results.join(',');
-  stats.data_quality = Math.min(stats.games_played / MIN_MATCHES_FOR_PREDICTION, 1.0);
-
-  if (allMatches.length < SEASON_TRANSITION_MATCHES) {
-    const historical = await getTeamHistoricalStats(teamName, competition);
-    if (historical) {
-      const rollingWeight = allMatches.length / SEASON_TRANSITION_MATCHES;
-      const histWeight = 1 - rollingWeight;
-      stats.home_avg_goals_for = (stats.home_avg_goals_for * rollingWeight) + (historical.home_avg_goals_for * histWeight);
-      stats.home_avg_goals_against = (stats.home_avg_goals_against * rollingWeight) + (historical.home_avg_goals_against * histWeight);
-      stats.away_avg_goals_for = (stats.away_avg_goals_for * rollingWeight) + (historical.away_avg_goals_for * histWeight);
-      stats.away_avg_goals_against = (stats.away_avg_goals_against * rollingWeight) + (historical.away_avg_goals_against * histWeight);
-      stats.avg_goals_for = (stats.avg_goals_for * rollingWeight) + (historical.avg_goals_for * histWeight);
-      stats.avg_goals_against = (stats.avg_goals_against * rollingWeight) + (historical.avg_goals_against * histWeight);
-      stats.data_source = `hybrid (${Math.round(rollingWeight * 100)}% rolling, ${Math.round(histWeight * 100)}% historical)`;
-    }
-  }
-  return stats;
+async function findTeamStatsFlexible(teamName, competition) {
+  try {
+    const { data, error } = await supabase.rpc('get_team_stats', {
+      p_team_name: teamName,
+      p_competition: competition
+    });
+    if (error) { console.error('RPC error:', error.message); return null; }
+    if (!data || !data.found) return null;
+    return {
+      team_name: data.team_name,
+      games_played: data.games_played,
+      avg_goals_for: data.avg_goals_for,
+      avg_goals_against: data.avg_goals_against,
+      home_avg_goals_for: data.home_avg_goals_for,
+      home_avg_goals_against: data.home_avg_goals_against,
+      away_avg_goals_for: data.away_avg_goals_for,
+      away_avg_goals_against: data.away_avg_goals_against,
+      data_source: data.data_source
+    };
+  } catch (e) { return null; }
 }
 
-async function getTeamHistoricalStats(teamName, competition) {
-  let { data } = await supabase.from('team_stats').select('*').eq('team_name', teamName).eq('competition', competition).single();
-  if (!data) {
-    const { data: allStats } = await supabase.from('team_stats').select('*').eq('competition', competition);
-    if (allStats) data = allStats.find(s => teamName.toLowerCase().includes(s.team_name.toLowerCase()) || s.team_name.toLowerCase().includes(teamName.toLowerCase()));
-  }
-  if (data) {
-    const rollingWeight = Math.min(data.games_played / 20, 1);
-    if (rollingWeight >= 1) {
-      data.data_source = 'historical (2025 season)';
-    } else if (rollingWeight > 0) {
-      data.data_source = `hybrid (${Math.round(rollingWeight * 100)}% rolling)`;
-    } else {
-      data.data_source = 'historical (2025 season)';
-    }
-    return data;
-  }
-  // Team not found in database - return empty stats
+async function getLeagueAveragesFromDB(competition) {
+  const { data, error } = await supabase.rpc('get_league_stats', {
+    p_competition: competition
+  });
+  if (error || !data || !data.found) return null;
   return {
-    team_name: teamName, competition: competition,
-    games_played: 0, wins: 0, draws: 0, losses: 0,
-    goals_for: 0, goals_against: 0,
-    home_games: 0, home_wins: 0, home_draws: 0, home_losses: 0,
-    home_goals_for: 0, home_goals_against: 0,
-    away_games: 0, away_wins: 0, away_draws: 0, away_losses: 0,
-    away_goals_for: 0, away_goals_against: 0,
-    avg_goals_for: 0, avg_goals_against: 0,
-    home_avg_goals_for: 0, home_avg_goals_against: 0,
-    away_avg_goals_for: 0, away_avg_goals_against: 0,
-    form_string: '', last_5_results: [], form_points: 0,
-    data_source: 'no data', matches_used: 0
+    avgHomeGoalsFor: data.home_avg_goals_for || 1.4,
+    avgHomeGoalsAgainst: data.home_avg_goals_against || 1.2,
+    avgAwayGoalsFor: data.away_avg_goals_for || 1.2,
+    avgAwayGoalsAgainst: data.away_avg_goals_against || 1.4,
+    source: data.data_source
   };
 }
 
 async function getLeagueRollingAverages(competition) {
-  const { data: allMatches } = await supabase.from('fixtures').select('*').eq('competition_code', competition).eq('status', 'FT').eq('season', '2026').order('match_date', { ascending: false }).limit(200);
+  const { data: allMatches } = await supabase
+    .from('fixtures').select('*')
+    .eq('competition_code', competition)
+    .eq('status', 'FT').eq('season', '2026')
+    .order('match_date', { ascending: false }).limit(200);
   if (!allMatches || allMatches.length === 0) return null;
   const homeGoals = allMatches.reduce((s, m) => s + (m.home_goals || 0), 0);
   const awayGoals = allMatches.reduce((s, m) => s + (m.away_goals || 0), 0);
   const count = allMatches.length;
-  return { avgHomeGoalsFor: homeGoals / count, avgHomeGoalsAgainst: awayGoals / count, avgAwayGoalsFor: awayGoals / count, avgAwayGoalsAgainst: homeGoals / count, avgTotalGoals: (homeGoals + awayGoals) / count, source: `rolling (${count} matches)` };
+  if (count < 5 || (homeGoals === 0 && awayGoals === 0)) return null;
+  return {
+    avgHomeGoalsFor: homeGoals / count,
+    avgHomeGoalsAgainst: awayGoals / count,
+    avgAwayGoalsFor: awayGoals / count,
+    avgAwayGoalsAgainst: homeGoals / count,
+    source: 'rolling (' + count + ' matches)'
+  };
 }
 
-// ============ FORM VALIDATION ============
 function validateForm(homeStats, awayStats, market) {
-  const homeForm = homeStats?.form_string || '';
-  const awayForm = awayStats?.form_string || '';
-
-  if (market === '1') {
-    if (homeForm.startsWith('LLL')) return { valid: false, reason: 'Home team lost last 3' };
-    if ((homeStats?.home_losses || 0) > (homeStats?.home_wins || 0) * 1.5) return { valid: false, reason: 'Home team loses more than wins at home' };
-  }
-  if (market === '2') {
-    if (awayForm.startsWith('LLL')) return { valid: false, reason: 'Away team lost last 3' };
-    if ((awayStats?.away_wins || 0) < (awayStats?.away_losses || 0)) return { valid: false, reason: 'Away team loses more than wins away' };
-  }
   if (market === 'Over 2.5') {
-    const homeAvg = homeStats?.avg_goals_for || 0;
-    const awayAvg = awayStats?.avg_goals_for || 0;
-    if (homeAvg < 1.2 && awayAvg < 1.2) return { valid: false, reason: `Both teams average <1.2 goals (${homeAvg.toFixed(1)} vs ${awayAvg.toFixed(1)})` };
-    const homeConcede = homeStats?.avg_goals_against || 0;
-    const awayConcede = awayStats?.avg_goals_against || 0;
-    if (homeConcede < 1.0 && awayConcede < 1.0) return { valid: false, reason: 'Both teams defend too well' };
+    const h = homeStats ? (homeStats.avg_goals_for || 0) : 0;
+    const a = awayStats ? (awayStats.avg_goals_for || 0) : 0;
+    if (h < 1.2 && a < 1.2) return { valid: false, reason: 'Low scoring teams' };
   }
   if (market === 'BTTS Yes') {
-    const homeScores = (homeStats?.home_avg_goals_for || 0) > 0.8;
-    const awayScores = (awayStats?.away_avg_goals_for || 0) > 0.8;
-    const homeConcedes = (homeStats?.home_avg_goals_against || 0) > 0.8;
-    const awayConcedes = (awayStats?.away_avg_goals_against || 0) > 0.8;
-    if (!homeScores || !awayScores) return { valid: false, reason: 'One or both teams struggle to score' };
-    if (!homeConcedes || !awayConcedes) return { valid: false, reason: 'One or both teams keep too many clean sheets' };
+    const hs = (homeStats ? (homeStats.home_avg_goals_for || 0) : 0) > 0.8;
+    const as = (awayStats ? (awayStats.away_avg_goals_for || 0) : 0) > 0.8;
+    const hc = (homeStats ? (homeStats.home_avg_goals_against || 0) : 0) > 0.8;
+    const ac = (awayStats ? (awayStats.away_avg_goals_against || 0) : 0) > 0.8;
+    if (!hs || !as) return { valid: false, reason: 'Low attack' };
+    if (!hc || !ac) return { valid: false, reason: 'Good defense' };
   }
   return { valid: true };
 }
 
-// ============ MAIN PREDICTION ============
 async function predictMatch(homeTeam, awayTeam, competition) {
-  const homeStats = await getTeamRollingStats(homeTeam, competition);
-  const awayStats = await getTeamRollingStats(awayTeam, competition);
-  const leagueAvgs = await getLeagueRollingAverages(competition);
+  const homeStats = await findTeamStatsFlexible(homeTeam, competition);
+  const awayStats = await findTeamStatsFlexible(awayTeam, competition);
+  let leagueAvgs = await getLeagueRollingAverages(competition);
+  if (!leagueAvgs) leagueAvgs = await getLeagueAveragesFromDB(competition);
 
-  // If no league data exists, cannot make honest prediction
   if (!leagueAvgs) {
-    return {
-      home_team: homeTeam,
-      away_team: awayTeam,
-      best_pick: null,
-      all_predictions: [],
-      top_picks: [],
-      reasoning: 'Insufficient league data. ' + competition + ' has 0 finished matches in database. Add historical data first.',
-      data_quality: 0,
-      status: 'NO_PICK',
-      data_source: { home: 'none', away: 'none' },
-      league_source: 'none',
-      home_xg: 0,
-      away_xg: 0,
-      raw_probabilities: {},
-      confidence: 'none'
-    };
-  }
-
-  const homeGames = homeStats?.games_played || 0;
-  const awayGames = awayStats?.games_played || 0;
-  const dataQuality = Math.min((homeGames + awayGames) / (MIN_MATCHES_FOR_PREDICTION * 2), 1.0);
-
-  if (dataQuality < DATA_QUALITY_GATES.MIN_FOR_ANY_PREDICTION) {
     return {
       home_team: homeTeam, away_team: awayTeam, best_pick: null,
       all_predictions: [], top_picks: [],
-      reasoning: `Insufficient data (${Math.round(dataQuality * 100)}%). Need ${MIN_MATCHES_FOR_PREDICTION}+ matches per team.`,
+      reasoning: 'No league data for ' + competition,
+      data_quality: 0, status: 'NO_PICK',
+      data_source: { home: 'none', away: 'none' },
+      league_source: 'none', home_xg: 0, away_xg: 0,
+      raw_probabilities: {}, confidence: 'none'
+    };
+  }
+
+  const homeGames = homeStats ? (homeStats.games_played || 0) : 0;
+  const awayGames = awayStats ? (awayStats.games_played || 0) : 0;
+  const dataQuality = Math.min((homeGames + awayGames) / 10, 1.0);
+
+  if (dataQuality < 0.30) {
+    return {
+      home_team: homeTeam, away_team: awayTeam, best_pick: null,
+      all_predictions: [], top_picks: [],
+      reasoning: 'Insufficient data (' + Math.round(dataQuality * 100) + '%)',
       data_quality: Math.round(dataQuality * 100), status: 'NO_PICK',
-      data_source: { home: homeStats?.data_source, away: awayStats?.data_source }
+      data_source: { home: homeStats ? homeStats.data_source : 'none', away: awayStats ? awayStats.data_source : 'none' }
     };
   }
 
   let homeXg, awayXg;
   if (homeStats && awayStats) {
-    const homeAttack = (homeStats.home_avg_goals_for || leagueAvgs.avgHomeGoalsFor) / leagueAvgs.avgHomeGoalsFor;
-    const homeDefense = (homeStats.home_avg_goals_against || leagueAvgs.avgHomeGoalsAgainst) / leagueAvgs.avgHomeGoalsAgainst;
-    const awayAttack = (awayStats.away_avg_goals_for || leagueAvgs.avgAwayGoalsFor) / leagueAvgs.avgAwayGoalsFor;
-    const awayDefense = (awayStats.away_avg_goals_against || leagueAvgs.avgAwayGoalsAgainst) / leagueAvgs.avgAwayGoalsAgainst;
-    homeXg = homeAttack * awayDefense * leagueAvgs.avgHomeGoalsFor;
-    awayXg = awayAttack * homeDefense * leagueAvgs.avgAwayGoalsFor;
+    const hA = (homeStats.home_avg_goals_for || leagueAvgs.avgHomeGoalsFor) / leagueAvgs.avgHomeGoalsFor;
+    const hD = (homeStats.home_avg_goals_against || leagueAvgs.avgHomeGoalsAgainst) / leagueAvgs.avgHomeGoalsAgainst;
+    const aA = (awayStats.away_avg_goals_for || leagueAvgs.avgAwayGoalsFor) / leagueAvgs.avgAwayGoalsFor;
+    const aD = (awayStats.away_avg_goals_against || leagueAvgs.avgAwayGoalsAgainst) / leagueAvgs.avgAwayGoalsAgainst;
+    homeXg = hA * aD * leagueAvgs.avgHomeGoalsFor;
+    awayXg = aA * hD * leagueAvgs.avgAwayGoalsFor;
   } else {
     homeXg = leagueAvgs.avgHomeGoalsFor;
     awayXg = leagueAvgs.avgAwayGoalsFor;
   }
 
-  if (homeStats?.form_points !== undefined) {
-    const formBoost = Math.min((homeStats.form_points / 20) * 0.15, 0.15);
-    homeXg *= (1 + formBoost);
-  }
-  if (awayStats?.form_points !== undefined) {
-    const formBoost = Math.min((awayStats.form_points / 20) * 0.15, 0.15);
-    awayXg *= (1 + formBoost);
-  }
-
   const homeDist = poissonDistribution(homeXg, 10);
   const awayDist = poissonDistribution(awayXg, 10);
-
   let homeWin = 0, draw = 0, awayWin = 0, over15 = 0, over25 = 0, btts = 0;
   for (let h = 0; h <= 10; h++) {
     for (let a = 0; a <= 10; a++) {
@@ -288,112 +168,62 @@ async function predictMatch(homeTeam, awayTeam, competition) {
   }
 
   const adjust = (prob) => prob * dataQuality + 0.5 * (1 - dataQuality);
-
-  const rawProbs = {
-    '1': homeWin, '2': awayWin,
-    '1X': homeWin + draw, 'X2': draw + awayWin,
-    'Over 1.5': over15, 'Over 2.5': over25,
-    'BTTS Yes': btts
-  };
-
+  const rawProbs = { '1': homeWin, '2': awayWin, '1X': homeWin + draw, 'X2': draw + awayWin, 'Over 1.5': over15, 'Over 2.5': over25, 'BTTS Yes': btts };
   const adjustedProbs = {};
-  for (const [market, prob] of Object.entries(rawProbs)) {
-    adjustedProbs[market] = adjust(prob);
-  }
+  for (const [m, p] of Object.entries(rawProbs)) adjustedProbs[m] = adjust(p);
 
-  const isStrictMode = dataQuality < DATA_QUALITY_GATES.STRICT_MODE_THRESHOLD;
-  const thresholdBonus = isStrictMode ? 0.05 : 0;
+  const isStrict = dataQuality < 0.60;
+  const bonus = isStrict ? 0.05 : 0;
 
   const allPredictions = [];
   const qualifiedPicks = [];
 
-  for (const [marketCode, config] of Object.entries(MARKETS)) {
-    const prob = adjustedProbs[marketCode];
-    const minProb = config.minProb + thresholdBonus;
-
-    // Add to ALL predictions (regardless of threshold)
-    allPredictions.push({
-      market: config.name,
-      marketCode,
-      probability: parseFloat(prob.toFixed(3)),
-      odds: parseFloat((1 / prob).toFixed(2)),
-      meetsThreshold: prob >= minProb,
-      minRequired: minProb
-    });
-
-    // Only add to qualified picks if it passes ALL checks
+  for (const [code, cfg] of Object.entries(MARKETS)) {
+    const prob = adjustedProbs[code];
+    const minProb = cfg.minProb + bonus;
+    allPredictions.push({ market: cfg.name, marketCode: code, probability: parseFloat(prob.toFixed(3)), odds: prob > 0 ? parseFloat((1 / prob).toFixed(2)) : null, meetsThreshold: prob >= minProb, minRequired: minProb });
     if (prob >= minProb) {
-      const formCheck = validateForm(homeStats, awayStats, marketCode);
-      if (formCheck.valid) {
-        let confidence = 'LOW';
-        if (prob >= 0.70 && dataQuality >= DATA_QUALITY_GATES.HIGH_CONFIDENCE_THRESHOLD) confidence = 'HIGH';
-        else if (prob >= 0.62) confidence = 'MEDIUM';
-
-        if (confidence !== 'LOW') {
-          qualifiedPicks.push({
-            market: config.name,
-            marketCode,
-            probability: parseFloat(prob.toFixed(3)),
-            confidence,
-            odds: parseFloat((1 / prob).toFixed(2)),
-            minRequired: minProb
-          });
-        }
+      const check = validateForm(homeStats, awayStats, code);
+      if (check.valid) {
+        let conf = 'LOW';
+        if (prob >= 0.70 && dataQuality >= 0.70) conf = 'HIGH';
+        else if (prob >= 0.62) conf = 'MEDIUM';
+        if (conf !== 'LOW') qualifiedPicks.push({ market: cfg.name, marketCode: code, probability: parseFloat(prob.toFixed(3)), confidence: conf, odds: prob > 0 ? parseFloat((1 / prob).toFixed(2)) : null, minRequired: minProb });
       }
     }
   }
 
-  // Sort by probability descending
   allPredictions.sort((a, b) => b.probability - a.probability);
   qualifiedPicks.sort((a, b) => b.probability - a.probability);
 
-  // Get today's day for top picks limit
   const today = new Date();
-  const dayOfWeek = today.getDay();
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 5 || dayOfWeek === 6;
-  const maxTopPicks = isWeekend ? MAX_PICKS_WEEKEND : MAX_PICKS_WEEKDAY;
+  const isWeekend = [0, 5, 6].includes(today.getDay());
+  const maxTop = isWeekend ? 5 : 3;
 
-  const topPicks = qualifiedPicks.slice(0, maxTopPicks).map((p, i) => ({
-    rank: i + 1,
-    ...p
+  const topPicks = qualifiedPicks.slice(0, maxTop).map((p, i) => ({
+    rank: i + 1, market: p.market, marketCode: p.marketCode,
+    probability: p.probability, confidence: p.confidence,
+    odds: p.odds, minRequired: p.minRequired
   }));
 
   const bestPick = qualifiedPicks.length > 0 ? qualifiedPicks[0] : null;
 
   let reasoning = '';
-  reasoning += `${homeTeam}: ${homeStats.games_played} games (${homeStats.data_source}). `;
-  reasoning += `Home: ${homeStats.home_avg_goals_for?.toFixed(1)} GF, ${homeStats.home_avg_goals_against?.toFixed(1)} GA/game. `;
-  reasoning += `${awayTeam}: ${awayStats.games_played} games (${awayStats.data_source}). `;
-  reasoning += `Away: ${awayStats.away_avg_goals_for?.toFixed(1)} GF, ${awayStats.away_avg_goals_against?.toFixed(1)} GA/game. `;
-  if (homeStats.form_string) {
-    reasoning += `Form: ${homeTeam} ${homeStats.form_string.replace(/,/g, '')} vs ${awayTeam} ${awayStats.form_string?.replace(/,/g, '') || 'N/A'}. `;
-  }
-  reasoning += `League avg: ${leagueAvgs.source}. `;
-  reasoning += `Data quality: ${Math.round(dataQuality * 100)}%. `;
-
-  if (bestPick) {
-    reasoning += `${bestPick.market} @ ${Math.round(bestPick.probability * 100)}% (${bestPick.confidence}). `;
-    if (isStrictMode) reasoning += `Strict mode (+5%).`;
-  } else {
-    reasoning += `No market met minimum thresholds.`;
-  }
+  if (homeStats) reasoning += homeTeam + ': ' + homeStats.games_played + ' games (' + homeStats.data_source + '). Home: ' + (homeStats.home_avg_goals_for || 0).toFixed(1) + ' GF, ' + (homeStats.home_avg_goals_against || 0).toFixed(1) + ' GA. ';
+  if (awayStats) reasoning += awayTeam + ': ' + awayStats.games_played + ' games (' + awayStats.data_source + '). Away: ' + (awayStats.away_avg_goals_for || 0).toFixed(1) + ' GF, ' + (awayStats.away_avg_goals_against || 0).toFixed(1) + ' GA. ';
+  reasoning += 'League: ' + leagueAvgs.source + '. DQ: ' + Math.round(dataQuality * 100) + '%. ';
+  if (bestPick) reasoning += bestPick.market + ' @ ' + Math.round(bestPick.probability * 100) + '% (' + bestPick.confidence + ').';
+  else reasoning += 'No market met thresholds.';
 
   return {
-    home_team: homeTeam,
-    away_team: awayTeam,
-    home_xg: parseFloat(homeXg.toFixed(2)),
-    away_xg: parseFloat(awayXg.toFixed(2)),
-    best_pick: bestPick,
-    all_predictions: allPredictions,
-    top_picks: deduplicateTopPicks(topPicks),
-    qualified_count: qualifiedPicks.length,
-    reasoning,
-    data_quality: Math.round(dataQuality * 100),
-    strict_mode: isStrictMode,
-    status: bestPick ? 'PICK' : 'NO_PICK',
-    is_weekend: isWeekend,
-    max_picks_today: maxTopPicks,
-    data_source: { home: homeStats.data_source, away: awayStats.data_source },
+    home_team: homeTeam, away_team: awayTeam,
+    home_xg: parseFloat(homeXg.toFixed(2)), away_xg: parseFloat(awayXg.toFixed(2)),
+    best_pick: bestPick, all_predictions: allPredictions, top_picks: topPicks,
+    qualified_count: qualifiedPicks.length, reasoning,
+    data_quality: Math.round(dataQuality * 100), strict_mode: isStrict,
+    status: bestPick ? 'PICK' : 'NO_PICK', is_weekend: isWeekend,
+    max_picks_today: maxTop,
+    data_source: { home: homeStats ? homeStats.data_source : 'none', away: awayStats ? awayStats.data_source : 'none' },
     league_source: leagueAvgs.source,
     raw_probabilities: {
       home_win: parseFloat((homeWin * 100).toFixed(1)),
@@ -406,159 +236,81 @@ async function predictMatch(homeTeam, awayTeam, competition) {
   };
 }
 
-// ============ AUTO-UPDATE TEAM STATS ============
-async function updateTeamStatsAfterMatch(fixtureId) {
-  const { data: fixture } = await supabase.from('fixtures').select('*').eq('id', fixtureId).single();
-  if (!fixture || fixture.status !== 'FT') return;
-
-  const homeStats = await getTeamRollingStats(fixture.home_team, fixture.competition_code);
-  const awayStats = await getTeamRollingStats(fixture.away_team, fixture.competition_code);
-
-  await supabase.from('team_stats').upsert([{
-    team_name: fixture.home_team, competition: fixture.competition_code,
-    ...homeStats, updated_at: new Date().toISOString()
-  }], { onConflict: 'team_name,competition' });
-
-  await supabase.from('team_stats').upsert([{
-    team_name: fixture.away_team, competition: fixture.competition_code,
-    ...awayStats, updated_at: new Date().toISOString()
-  }], { onConflict: 'team_name,competition' });
-
-  console.log(`✅ Updated rolling stats for ${fixture.home_team} and ${fixture.away_team}`);
-}
-
-// ============ STREAK TRACKER ============
-async function getStreakTracker(days = 30) {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
-
-  const { data: results } = await supabase
-    .from('prediction_results').select('*')
-    .gte('created_at', cutoff.toISOString())
-    .order('created_at', { ascending: false });
-
-  if (!results || results.length === 0) {
-    return { period: `${days} days`, total_picks: 0, wins: 0, losses: 0, win_rate: 0, current_streak: 0, streak_type: 'NONE', best_streak: 0, worst_streak: 0, roi: 0, by_market: [] };
-  }
-
-  const wins = results.filter(r => r.result === 'WIN').length;
-  const losses = results.filter(r => r.result === 'LOSS').length;
-  const total = results.length;
-
-  let currentStreak = 0, streakType = 'NONE';
-  for (const r of results) {
-    if (r.result === 'WIN') { if (streakType === 'WIN' || streakType === 'NONE') { currentStreak++; streakType = 'WIN'; } else break; }
-    else if (r.result === 'LOSS') { if (streakType === 'LOSS' || streakType === 'NONE') { currentStreak++; streakType = 'LOSS'; } else break; }
-  }
-
-  let bestStreak = 0, worstStreak = 0, currentBest = 0, currentWorst = 0;
-  for (const r of [...results].reverse()) {
-    if (r.result === 'WIN') { currentBest++; currentWorst = 0; bestStreak = Math.max(bestStreak, currentBest); }
-    else { currentWorst++; currentBest = 0; worstStreak = Math.max(worstStreak, currentWorst); }
-  }
-
-  const byMarket = {};
-  results.forEach(r => {
-    const m = r.market || 'Unknown';
-    if (!byMarket[m]) byMarket[m] = { total: 0, wins: 0 };
-    byMarket[m].total++;
-    if (r.result === 'WIN') byMarket[m].wins++;
-  });
-
-  const avgOdds = 1.80;
-  const profit = (wins * avgOdds) - total;
-  const roi = total > 0 ? ((profit / total) * 100).toFixed(1) : 0;
-
-  return {
-    period: `${days} days`, total_picks: total, wins, losses,
-    win_rate: total > 0 ? Math.round((wins / total) * 100) : 0,
-    current_streak: currentStreak, streak_type: streakType,
-    best_streak: bestStreak, worst_streak: worstStreak,
-    roi,
-    by_market: Object.entries(byMarket).map(([market, stats]) => ({
-      market, total: stats.total, wins: stats.wins, win_rate: Math.round((stats.wins / stats.total) * 100)
-    }))
-  };
-}
-
-// ============ GET ALL PICKS + TOP PICKS ============
 async function getAllPicks() {
   const today = new Date();
-  const dayOfWeek = today.getDay();
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 5 || dayOfWeek === 6;
-  const maxTopPicks = isWeekend ? MAX_PICKS_WEEKEND : MAX_PICKS_WEEKDAY;
-
+  const isWeekend = [0, 5, 6].includes(today.getDay());
+  const maxTop = isWeekend ? 5 : 3;
   const todayStr = today.toISOString().split('T')[0];
-  const threeDaysLater = new Date();
-  threeDaysLater.setDate(threeDaysLater.getDate() + 14);
+  const later = new Date(); later.setDate(later.getDate() + 14);
 
   const { data: fixtures } = await supabase
     .from('fixtures').select('*')
-    .gte('match_date', `${todayStr}T00:00:00`)
-    .lte('match_date', threeDaysLater.toISOString())
+    .gte('match_date', todayStr + 'T00:00:00')
+    .lte('match_date', later.toISOString())
     .order('match_date', { ascending: true });
 
   if (!fixtures || fixtures.length === 0) {
-    return { date: todayStr, is_weekend: isWeekend, max_picks: maxTopPicks, all_predictions: [], top_picks: [], total_found: 0 };
+    return { date: todayStr, is_weekend: isWeekend, max_picks: maxTop, all_predictions: [], top_picks: [], total_qualified: 0, total_found: 0 };
   }
 
   const allPredictions = [];
   const allQualified = [];
 
-  for (const fixture of fixtures) {
-    const pred = await predictMatch(fixture.home_team, fixture.away_team, fixture.competition_code || 'PL');
-
-    // Add ALL predictions for this match
+  for (const f of fixtures) {
+    const pred = await predictMatch(f.home_team, f.away_team, f.competition_code || 'PL');
     allPredictions.push({
-      fixture_id: fixture.id,
-      match: `${fixture.home_team} vs ${fixture.away_team}`,
-      league: fixture.league,
-      date: fixture.match_date,
-      all_markets: pred.all_predictions,
-      best_pick: pred.best_pick,
-      reasoning: pred.reasoning,
-      data_quality: pred.data_quality,
-      status: pred.status
+      fixture_id: f.id, match: f.home_team + ' vs ' + f.away_team,
+      league: f.league, date: f.match_date,
+      all_markets: pred.all_predictions, best_pick: pred.best_pick,
+      reasoning: pred.reasoning, data_quality: pred.data_quality, status: pred.status
     });
-
-    // Add qualified picks to the pool
-    if (pred.top_picks && pred.top_picks.length > 0) {
+    if (pred.top_picks) {
       pred.top_picks.forEach(p => {
-        allQualified.push({
-          fixture_id: fixture.id,
-          match: `${fixture.home_team} vs ${fixture.away_team}`,
-          league: fixture.league,
-          date: fixture.match_date,
-          ...p
-        });
+        allQualified.push({ fixture_id: f.id, match: f.home_team + ' vs ' + f.away_team, league: f.league, date: f.match_date, market: p.market, marketCode: p.marketCode, probability: p.probability, confidence: p.confidence, odds: p.odds, minRequired: p.minRequired });
       });
     }
   }
 
-  // Sort all qualified by probability and take top N
   allQualified.sort((a, b) => b.probability - a.probability);
-  const topPicks = allQualified.slice(0, maxTopPicks).map((p, i) => ({ rank: i + 1, ...p }));
+  const seen = new Set();
+  const deduped = [];
+  for (const p of allQualified) {
+    if (seen.has(p.fixture_id)) continue;
+    seen.add(p.fixture_id);
+    deduped.push(p);
+    if (deduped.length >= maxTop) break;
+  }
 
-  return {
-    date: todayStr,
-    is_weekend: isWeekend,
-    max_picks: maxTopPicks,
-    all_predictions: allPredictions,
-    top_picks: topPicks,
-    total_qualified: allQualified.length,
-    total_found: allPredictions.length
-  };
+  const topPicks = deduped.map((p, i) => ({
+    rank: i + 1, fixture_id: p.fixture_id, match: p.match, league: p.league,
+    date: p.date, market: p.market, marketCode: p.marketCode,
+    probability: p.probability, confidence: p.confidence, odds: p.odds, minRequired: p.minRequired
+  }));
+
+  return { date: todayStr, is_weekend: isWeekend, max_picks: maxTop, all_predictions: allPredictions, top_picks: topPicks, total_qualified: allQualified.length, total_found: allPredictions.length };
 }
 
-
-// DEDUPLICATE TOP PICKS - each fixture appears only once (highest prob)
-function deduplicateTopPicks(picks) {
-    const seen = new Set();
-    return picks.filter(p => {
-        if (seen.has(p.fixture_id)) return false;
-        seen.add(p.fixture_id);
-        return true;
-    });
+async function getStreakTracker(days = 30) {
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - days);
+  const { data: results } = await supabase.from('prediction_results').select('*').gte('created_at', cutoff.toISOString()).order('created_at', { ascending: false });
+  if (!results || results.length === 0) return { period: days + ' days', total_picks: 0, wins: 0, losses: 0, win_rate: 0, roi: 0 };
+  const wins = results.filter(r => r.result === 'WIN').length;
+  const total = results.length;
+  const profit = (wins * 1.80) - total;
+  return { period: days + ' days', total_picks: total, wins, losses: total - wins, win_rate: total > 0 ? Math.round((wins / total) * 100) : 0, roi: total > 0 ? ((profit / total) * 100).toFixed(1) : 0 };
 }
 
-module.exports = { predictMatch, getStreakTracker, getAllPicks, updateTeamStatsAfterMatch, getTeamRollingStats, getLeagueRollingAverages };
+async function updateTeamStatsAfterMatch(fixtureId) {
+  const { data: fixture } = await supabase.from('fixtures').select('*').eq('id', fixtureId).single();
+  if (!fixture || fixture.status !== 'FT') return;
+  const homeStats = await findTeamStatsFlexible(fixture.home_team, fixture.competition_code);
+  const awayStats = await findTeamStatsFlexible(fixture.away_team, fixture.competition_code);
+  if (homeStats) {
+    await supabase.from('team_stats').upsert([{ team_name: fixture.home_team, competition: fixture.competition_code, games_played: homeStats.games_played, goals_for: homeStats.goals_for, goals_against: homeStats.goals_against, data_source: homeStats.data_source, updated_at: new Date().toISOString() }], { onConflict: 'team_name,competition' });
+  }
+  if (awayStats) {
+    await supabase.from('team_stats').upsert([{ team_name: fixture.away_team, competition: fixture.competition_code, games_played: awayStats.games_played, goals_for: awayStats.goals_for, goals_against: awayStats.goals_against, data_source: awayStats.data_source, updated_at: new Date().toISOString() }], { onConflict: 'team_name,competition' });
+  }
+}
+
+module.exports = { predictMatch, getStreakTracker, getAllPicks, updateTeamStatsAfterMatch };
