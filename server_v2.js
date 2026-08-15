@@ -30,13 +30,25 @@ function setCachedPredictions(data) {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+//app.use(cors());
+
+app.use(cors({
+  origin: [
+    'http://localhost:3000',           // Local React dev
+    'http://localhost:5173',           // Vite dev
+    'https://betatips.com.ng' // Production frontend (replace with yours)
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
+
+
 
 // ============ HEALTH ============
 app.get('/api/health', (req, res) => {
