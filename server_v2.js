@@ -36,7 +36,8 @@ app.use(cors({
   origin: [
     'http://localhost:3000',           // Local React dev
     'http://localhost:5173',           // Vite dev
-    'https://betatips.com.ng' // Production frontend (replace with yours)
+    'https://betatips.com.ng', // Production frontend (replace with yours)
+    'https://beta-front-lnqk-pi.vercel.app'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
