@@ -50,6 +50,288 @@ const supabase = createClient(
 );
 
 
+const axios = require('axios');
+
+// ============ PAYSTACK CONFIG ============
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
+
+// ============ 2SUREODD PAYWALL ============
+
+// Initialize payment
+app.post('/api/2sureodd/pay', async (req, res) => {
+  const { email, amount, currency, plan, duration_days } = req.body;
+  
+  if (!email) return res.status(400).json({ error: 'Email required' });
+  if (!PAYSTACK_SECRET) return res.status(500).json({ error: 'Paystack not configured' });
+
+  try {
+    const response = await axios.post('https://api.paystack.co/transaction/initialize', {
+      email,
+      amount: amount * 100,
+      currency,
+      callback_url: `${req.headers.origin || 'https://betatips.com.ng'}/2sureodd?verify=true`,
+      metadata: {
+        custom_fields: [
+          { display_name: "Product", variable_name: "product", value: "2SureOdd " + (plan || 'weekly') }
+        ]
+      }
+    }, {
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+    });
+
+    const { data } = response.data;
+
+    await supabase.from('subscriptions_2sureodd').insert([{
+      email,
+      reference: data.reference,
+      amount,
+      currency,
+      plan: plan || 'weekly',
+      duration_days: duration_days || 7,
+      status: 'pending',
+      access_granted: false,
+      expires_at: new Date(Date.now() + (duration_days || 7) * 24 * 60 * 60 * 1000)
+    }]);
+
+    res.json({ 
+      success: true, 
+      authorization_url: data.authorization_url,
+      reference: data.reference 
+    });
+
+  } catch (err) {
+    console.error('Paystack init error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Payment initialization failed' });
+  }
+});
+
+// Verify payment
+app.get('/api/2sureodd/verify', async (req, res) => {
+  const { reference } = req.query;
+  
+  if (!reference) return res.status(400).json({ error: 'Reference required' });
+  if (!PAYSTACK_SECRET) return res.status(500).json({ error: 'Paystack not configured' });
+
+  try {
+    const response = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+    });
+
+    const { data } = response.data;
+    const isSuccess = data.status === 'success';
+
+    await supabase
+      .from('subscriptions_2sureodd')
+      .update({
+        status: data.status,
+        access_granted: isSuccess,
+        updated_at: new Date().toISOString()
+      })
+      .eq('reference', reference);
+
+    res.json({ 
+      success: isSuccess, 
+      message: isSuccess ? 'Payment verified' : 'Payment failed',
+      email: data.customer?.email,
+      reference 
+    });
+
+  } catch (err) {
+    console.error('Paystack verify error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// Check access
+app.post('/api/2sureodd/check-access', async (req, res) => {
+  const { email } = req.body;
+  
+  if (!email) return res.status(400).json({ error: 'Email required' });
+
+  try {
+    const { data } = await supabase
+      .from('subscriptions_2sureodd')
+      .select('*')
+      .eq('email', email.toLowerCase().trim())
+      .eq('access_granted', true)
+      .gte('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    const hasAccess = !!data;
+
+    res.json({
+      has_access: hasAccess,
+      expires_at: data?.expires_at || null,
+      email
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get 2SureOdd picks (MANUAL — reads from your posted picks)
+app.get('/api/2sureodd/picks', async (req, res) => {
+  const { email } = req.query;
+  
+  if (!email) return res.status(400).json({ error: 'Email required' });
+
+  try {
+    const { data: sub } = await supabase
+      .from('subscriptions_2sureodd')
+      .select('*')
+      .eq('email', email.toLowerCase().trim())
+      .eq('access_granted', true)
+      .gte('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!sub) {
+      return res.status(403).json({ error: 'Access denied. Please subscribe.' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const { data: picks } = await supabase
+      .from('twosureodd_picks')
+      .select('*')
+      .gte('match_date', today)
+      .eq('status', 'active')
+      .order('match_date', { ascending: true })
+      .limit(2);
+
+    res.json({
+      access: true,
+      expires_at: sub.expires_at,
+      picks: picks && picks.length > 0 ? picks.map(p => ({
+        match: p.match,
+        league: p.league,
+        date: p.match_date,
+        prediction: p.prediction,
+        confidence: p.confidence,
+        odds: p.odds
+      })) : []
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Public: Get 2SureOdd results (for tracking page)
+app.get('/api/2sureodd/results', async (req, res) => {
+  try {
+    const { data } = await supabase
+      .from('twosureodd_picks')
+      .select('*')
+      .order('match_date', { ascending: false })
+      .limit(30);
+
+    const stats = {
+      total: data?.length || 0,
+      wins: data?.filter(p => p.result === 'WIN').length || 0,
+      losses: data?.filter(p => p.result === 'LOSS').length || 0,
+      pending: data?.filter(p => p.result === 'PENDING').length || 0,
+      win_rate: data?.filter(p => p.result !== 'PENDING').length > 0 
+        ? ((data.filter(p => p.result === 'WIN').length / data.filter(p => p.result !== 'PENDING').length) * 100).toFixed(1) 
+        : 0
+    };
+
+    res.json({ picks: data || [], stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: Add a 2SureOdd pick
+app.post('/api/admin/2sureodd/picks', async (req, res) => {
+  const { admin_key, match, league, match_date, prediction, confidence, odds } = req.body;
+  
+  if (admin_key !== process.env.ADMIN_SECRET_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('twosureodd_picks')
+      .insert([{ match, league, match_date, prediction, confidence, odds }]);
+    
+    if (error) throw error;
+    res.json({ success: true, pick: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: Update result of a 2SureOdd pick
+app.post('/api/admin/2sureodd/result', async (req, res) => {
+  const { admin_key, pick_id, result } = req.body;
+  
+  if (admin_key !== process.env.ADMIN_SECRET_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  if (!pick_id || !['WIN', 'LOSS', 'PENDING'].includes(result)) {
+    return res.status(400).json({ error: 'Need pick_id and result (WIN/LOSS/PENDING)' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('twosureodd_picks')
+      .update({ 
+        result, 
+        updated_at: new Date().toISOString() 
+      })
+      .eq('id', pick_id)
+      .select();
+
+    if (error) throw error;
+    
+    res.json({ 
+      success: true, 
+      message: `Pick marked as ${result}`,
+      pick: data 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Paystack Webhook
+app.post('/api/paystack/webhook', async (req, res) => {
+  const hash = require('crypto')
+    .createHmac('sha512', PAYSTACK_SECRET)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+
+  if (hash !== req.headers['x-paystack-signature']) {
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const event = req.body;
+  
+  if (event.event === 'charge.success') {
+    const { reference } = event.data;
+    
+    await supabase
+      .from('subscriptions_2sureodd')
+      .update({
+        status: 'success',
+        access_granted: true,
+        updated_at: new Date().toISOString()
+      })
+      .eq('reference', reference);
+  }
+
+  res.sendStatus(200);
+});
+
+
+
+
+
 
 // ============ HEALTH ============
 app.get('/api/health', (req, res) => {
