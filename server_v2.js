@@ -274,9 +274,11 @@ app.get('/api/2sureodd/picks', async (req, res) => {
       match: p.match,
       league: p.league,
       date: p.match_date,
+      time: p.match_time,
       prediction: p.prediction,
       confidence: p.confidence,
-      odds: p.odds
+      odds: p.odds,
+      result: p.result || 'PENDING'
     }));
 
     res.json({
@@ -318,7 +320,7 @@ app.get('/api/2sureodd/results', async (req, res) => {
 
 // Admin: Add a 2SureOdd pick
 app.post('/api/admin/2sureodd/picks', async (req, res) => {
-  const { admin_key, match, league, match_date, prediction, confidence, odds } = req.body;
+  const { admin_key, match, league, match_date, match_time, prediction, confidence, odds } = req.body;
   
   if (admin_key !== process.env.ADMIN_SECRET_KEY) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -327,7 +329,7 @@ app.post('/api/admin/2sureodd/picks', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('twosureodd_picks')
-      .insert([{ match, league, match_date, prediction, confidence, odds }]);
+      .insert([{ match, league, match_date, match_time, prediction, confidence, odds, status: 'active', result: 'PENDING' }]);
     
     if (error) throw error;
     res.json({ success: true, pick: data });
@@ -365,6 +367,30 @@ app.post('/api/admin/2sureodd/result', async (req, res) => {
       message: `Pick marked as ${result}`,
       pick: data 
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: Delete a 2SureOdd pick
+app.post('/api/admin/2sureodd/delete', async (req, res) => {
+  const { admin_key, pick_id } = req.body;
+
+  if (admin_key !== process.env.ADMIN_SECRET_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!pick_id) {
+    return res.status(400).json({ error: 'Need pick_id' });
+  }
+
+  try {
+    const { error } = await supabase
+      .from('twosureodd_picks')
+      .delete()
+      .eq('id', pick_id);
+
+    if (error) throw error;
+    res.json({ success: true, message: 'Pick deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -604,92 +630,4 @@ app.post('/api/sync/fixtures', async (req, res) => {
   }
 });
 
-// ============ SEED DEMO DATA ============
-app.post('/api/seed/worldcup', async (req, res) => {
-  try {
-    const demoFixtures = [
-      { home_team: 'DR Congo', away_team: 'Uzbekistan', match_date: '2026-07-25T15:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Jordan', away_team: 'Argentina', match_date: '2026-07-25T15:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Panama', away_team: 'England', match_date: '2026-07-25T18:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Algeria', away_team: 'Austria', match_date: '2026-07-25T18:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Croatia', away_team: 'Ghana', match_date: '2026-07-25T21:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Saudi Arabia', away_team: 'Italy', match_date: '2026-07-26T15:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Mexico', away_team: 'Netherlands', match_date: '2026-07-26T18:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
-      { home_team: 'Japan', away_team: 'Belgium', match_date: '2026-07-26T21:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' }
-    ];
-
-    const { data: inserted, error: fixError } = await supabase.from('fixtures').upsert(demoFixtures, { onConflict: 'home_team,away_team,match_date' }).select();
-    if (fixError) throw fixError;
-
-    const predictions = [];
-    for (const fixture of inserted || demoFixtures) {
-      const pred = await predictMatch(fixture.home_team, fixture.away_team, 'WC');
-      if (pred.best_pick && pred.status === 'PICK') {
-        predictions.push({
-          fixture_id: fixture.id, best_market: pred.best_pick.market,
-          best_market_code: pred.best_pick.marketCode,
-          best_probability: pred.best_pick.probability,
-          confidence: pred.best_pick.confidence,
-          all_probabilities: pred.raw_probabilities,
-          reasoning: pred.reasoning, data_quality: pred.data_quality,
-          strict_mode: pred.strict_mode,
-          created_at: new Date().toISOString()
-        });
-      }
-    }
-    if (predictions.length > 0) await supabase.from('predictions').insert(predictions);
-
-    res.json({
-      message: 'World Cup fixtures seeded successfully',
-      fixtures_added: demoFixtures.length,
-      predictions_generated: predictions.length,
-      note: 'V2 mode: All predictions shown + top picks separated'
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============ DEBUG ENDPOINTS ============
-app.get('/api/debug/team-stats', async (req, res) => {
-  try {
-    const { data } = await supabase.from('team_stats').select('*').order('goals_for', { ascending: false }).limit(20);
-    res.json({ count: data?.length || 0, teams: data || [] });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/debug/fixtures', async (req, res) => {
-  try {
-    const { data } = await supabase.from('fixtures').select('*').order('match_date', { ascending: false }).limit(20);
-    res.json({ count: data?.length || 0, fixtures: data || [] });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/debug/predictions', async (req, res) => {
-  try {
-    const { data } = await supabase.from('predictions').select('*').order('created_at', { ascending: false }).limit(20);
-    res.json({ count: data?.length || 0, predictions: data || [] });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// ============ START SERVER ============
-app.listen(PORT, () => {
-  console.log(`✅ HARDCORE Predictions Server - V2`);
-  console.log(`   Port: ${PORT}`);
-  console.log(`   API: Football-Data.org`);
-  console.log(`   Mode: ALL PREDICTIONS + TOP PICKS`);
-  console.log('');
-  console.log('Endpoints:');
-  console.log('  GET  /api/health');
-  console.log('  GET  /api/picks/all          ← ALL predictions + top picks separated');
-  console.log('  GET  /api/picks/top          ← Top picks only (3 weekday, 5 weekend)');
-  console.log('  POST /api/predict            ← Single match prediction');
-  console.log('  GET  /api/tracker            ← Streak tracker');
-  console.log('  GET  /api/performance');
-  console.log('  GET  /api/fixtures/today');
-  console.log('  GET  /api/fixtures/upcoming');
-  console.log('  GET  /api/fixtures/:id');
-  console.log('  POST /api/sync/fixtures');
-  console.log('  POST /api/seed/worldcup');
-  console.log('  POST /api/fixtures/:id/result');
-});
+// ============ SEED 
