@@ -261,14 +261,14 @@ app.get('/api/2sureodd/picks', async (req, res) => {
       return res.status(403).json({ error: 'Access denied. Please subscribe.' });
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const { data: rows } = await supabase
       .from('twosureodd_picks')
       .select('*')
-      .gte('match_date', today)
+      .gte('match_date', fourteenDaysAgo)
       .eq('status', 'active')
-      .order('match_date', { ascending: true })
-      .limit(2);
+      .order('match_date', { ascending: false })
+      .limit(20);
 
     const picks = (rows || []).map(p => ({
       match: p.match,
@@ -630,4 +630,92 @@ app.post('/api/sync/fixtures', async (req, res) => {
   }
 });
 
-// ============ SEED 
+// ============ SEED DEMO DATA ============
+app.post('/api/seed/worldcup', async (req, res) => {
+  try {
+    const demoFixtures = [
+      { home_team: 'DR Congo', away_team: 'Uzbekistan', match_date: '2026-07-25T15:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Jordan', away_team: 'Argentina', match_date: '2026-07-25T15:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Panama', away_team: 'England', match_date: '2026-07-25T18:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Algeria', away_team: 'Austria', match_date: '2026-07-25T18:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Croatia', away_team: 'Ghana', match_date: '2026-07-25T21:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Saudi Arabia', away_team: 'Italy', match_date: '2026-07-26T15:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Mexico', away_team: 'Netherlands', match_date: '2026-07-26T18:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' },
+      { home_team: 'Japan', away_team: 'Belgium', match_date: '2026-07-26T21:00:00', league: 'World Cup 2026', status: 'NS', competition_code: 'WC' }
+    ];
+
+    const { data: inserted, error: fixError } = await supabase.from('fixtures').upsert(demoFixtures, { onConflict: 'home_team,away_team,match_date' }).select();
+    if (fixError) throw fixError;
+
+    const predictions = [];
+    for (const fixture of inserted || demoFixtures) {
+      const pred = await predictMatch(fixture.home_team, fixture.away_team, 'WC');
+      if (pred.best_pick && pred.status === 'PICK') {
+        predictions.push({
+          fixture_id: fixture.id, best_market: pred.best_pick.market,
+          best_market_code: pred.best_pick.marketCode,
+          best_probability: pred.best_pick.probability,
+          confidence: pred.best_pick.confidence,
+          all_probabilities: pred.raw_probabilities,
+          reasoning: pred.reasoning, data_quality: pred.data_quality,
+          strict_mode: pred.strict_mode,
+          created_at: new Date().toISOString()
+        });
+      }
+    }
+    if (predictions.length > 0) await supabase.from('predictions').insert(predictions);
+
+    res.json({
+      message: 'World Cup fixtures seeded successfully',
+      fixtures_added: demoFixtures.length,
+      predictions_generated: predictions.length,
+      note: 'V2 mode: All predictions shown + top picks separated'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ DEBUG ENDPOINTS ============
+app.get('/api/debug/team-stats', async (req, res) => {
+  try {
+    const { data } = await supabase.from('team_stats').select('*').order('goals_for', { ascending: false }).limit(20);
+    res.json({ count: data?.length || 0, teams: data || [] });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/debug/fixtures', async (req, res) => {
+  try {
+    const { data } = await supabase.from('fixtures').select('*').order('match_date', { ascending: false }).limit(20);
+    res.json({ count: data?.length || 0, fixtures: data || [] });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/debug/predictions', async (req, res) => {
+  try {
+    const { data } = await supabase.from('predictions').select('*').order('created_at', { ascending: false }).limit(20);
+    res.json({ count: data?.length || 0, predictions: data || [] });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ============ START SERVER ============
+app.listen(PORT, () => {
+  console.log(`✅ HARDCORE Predictions Server - V2`);
+  console.log(`   Port: ${PORT}`);
+  console.log(`   API: Football-Data.org`);
+  console.log(`   Mode: ALL PREDICTIONS + TOP PICKS`);
+  console.log('');
+  console.log('Endpoints:');
+  console.log('  GET  /api/health');
+  console.log('  GET  /api/picks/all          ← ALL predictions + top picks separated');
+  console.log('  GET  /api/picks/top          ← Top picks only (3 weekday, 5 weekend)');
+  console.log('  POST /api/predict            ← Single match prediction');
+  console.log('  GET  /api/tracker            ← Streak tracker');
+  console.log('  GET  /api/performance');
+  console.log('  GET  /api/fixtures/today');
+  console.log('  GET  /api/fixtures/upcoming');
+  console.log('  GET  /api/fixtures/:id');
+  console.log('  POST /api/sync/fixtures');
+  console.log('  POST /api/seed/worldcup');
+  console.log('  POST /api/fixtures/:id/result');
+});
